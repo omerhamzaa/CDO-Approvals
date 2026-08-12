@@ -1469,6 +1469,16 @@ async function supaPush(type,rows){
   if(!res.ok) throw new Error('push '+res.status+' '+(await res.text()));
 }
 
+/* cloud se ek row hatao */
+async function supaDelete(type,itemId){
+  var res=await fetch(SUPABASE_URL+'/rest/v1/records'
+    +'?project=eq.'+encodeURIComponent(CLOUD_PROJECT)
+    +'&type=eq.'+encodeURIComponent(type)
+    +'&item_id=eq.'+encodeURIComponent(String(itemId)),
+    {method:'DELETE',headers:supaHeaders()});
+  if(!res.ok) throw new Error('delete '+res.status+' '+(await res.text()));
+}
+
 /* bari base64 files cloud par nahin bhejte — row bhaari ho jati hai */
 function stripBig(o){
   var c; try{ c=JSON.parse(JSON.stringify(o)); }catch(e){ return o; }
@@ -1506,6 +1516,18 @@ async function vdcPush(db){
       return {item_id:String(e.id||('e'+i)), data:stripBig(e)};
     });
     for(var i=0;i<arr.length;i+=25){ await supaPush('vdc_entry',arr.slice(i,i+25)); }
+
+    /* ---- DELETE DIFF ----
+       Upsert kabhi kuch mitata nahin. Agar user ne koi entry delete ki hai to
+       uski row cloud par pari reh jati thi aur agle pull par wapas aa jati thi.
+       Yahan cloud ki list se wo rows hatate hain jo ab local mein nahin hain. */
+    var localIds={}; arr.forEach(function(r){ localIds[r.item_id]=1; });
+    var remote=await supaPull('vdc_entry');
+    for(var j=0;j<remote.length;j++){
+      if(!localIds[String(remote[j].item_id)]){
+        await supaDelete('vdc_entry', remote[j].item_id);
+      }
+    }
     cloudStatus('ok');
   }catch(e){ cloudStatus('err'); console.warn('vdc push',e); }
 }

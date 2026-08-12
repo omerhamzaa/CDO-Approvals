@@ -969,9 +969,12 @@ const app = (function(){
     $("#f-start").value=e.start||""; $("#f-end").value=e.end||"";
     $("#f-detail").value=e.detail||""; renderDocs(e.docs||{});
   }
-  function del(id){ requireAdmin(()=>{ if(!confirm("Delete this entry?")) return;
-    db.entries=db.entries.filter(e=>e.id!==id); persist(); renderSummary($("#search").value); toast("Entry deleted"); },
-    "Deleting a saved record needs admin approval."); }
+  function del(id){ requireAdmin(()=>{
+      askYesNo("Delete this entry? Ye wapas nahin aayegi.", function(){
+        db.entries=db.entries.filter(e=>e.id!==id);
+        persist(); renderSummary($("#search").value); toast("Entry deleted");
+      });
+    }, "Deleting a saved record needs admin approval."); }
 
   // ---- Master ----
   function renderMaster(){
@@ -1362,7 +1365,8 @@ const app = (function(){
     $("#u-name").value=$("#u-email").value=$("#u-pass").value=""; toast("User added");
   }
   function delUser(i){ if(db.users[i]?.username==="admin") return;
-    if(!confirm("Delete this user?")) return; db.users.splice(i,1); persist(); renderUsers(); fillLoginUsers(); }
+    askYesNo("Delete this user?", function(){
+      db.users.splice(i,1); persist(); renderUsers(); fillLoginUsers(); }); }
 
   // ---- Auth ----
   let authed=false, setupUnlocked=false;
@@ -1381,6 +1385,41 @@ const app = (function(){
 
   // ---- admin verification gate ----
   let adminCb=null;
+  /* ---- iframe-safe confirm ----
+     Google Sites app ko sandboxed iframe mein chalata hai jahan browser
+     confirm()/alert() block kar deta hai aur chup-chaap false wapas karta hai.
+     Us wajah se delete kabhi chalta hi nahin tha. Ab apna HTML popup. ---- */
+  function askYesNo(message, onYes){
+    var old=document.getElementById('yn-gate'); if(old) old.remove();
+    var wrap=document.createElement('div');
+    wrap.id='yn-gate';
+    wrap.style.cssText='position:fixed;inset:0;z-index:100000;background:rgba(0,0,0,.45);'
+      +'display:flex;align-items:center;justify-content:center;padding:16px';
+    var box=document.createElement('div');
+    box.style.cssText='background:#fff;color:#111;border-radius:12px;padding:20px 22px;'
+      +'max-width:380px;width:100%;font:15px/1.5 system-ui,sans-serif;'
+      +'box-shadow:0 10px 40px rgba(0,0,0,.35)';
+    var p=document.createElement('p');
+    p.textContent=message; p.style.cssText='margin:0 0 18px';
+    var row=document.createElement('div');
+    row.style.cssText='display:flex;gap:10px;justify-content:flex-end';
+    var no=document.createElement('button');
+    no.textContent='Cancel';
+    no.style.cssText='padding:8px 16px;border-radius:8px;border:1px solid #cbd5e1;'
+      +'background:#fff;cursor:pointer;font:inherit';
+    var yes=document.createElement('button');
+    yes.textContent='Yes, delete';
+    yes.style.cssText='padding:8px 16px;border-radius:8px;border:0;'
+      +'background:#dc2626;color:#fff;cursor:pointer;font:inherit;font-weight:600';
+    no.onclick=function(){ wrap.remove(); };
+    yes.onclick=function(){ wrap.remove(); try{ onYes(); }catch(e){ console.warn(e); } };
+    row.appendChild(no); row.appendChild(yes);
+    box.appendChild(p); box.appendChild(row);
+    wrap.appendChild(box); document.body.appendChild(wrap);
+    setTimeout(function(){ yes.focus(); },30);
+  }
+  window.__vdcAsk=askYesNo;
+
   function requireAdmin(cb, msg){ adminCb=cb;
     $("#ag-msg").textContent=msg||"Enter the admin password to continue.";
     $("#ag-err").textContent=""; $("#ag-pass").value="";
@@ -1573,9 +1612,9 @@ async function vdcPull(silent){
 }
 
 async function vdcPushAll(){
-  if(!cloudOn()){ alert('Pehle SUPABASE_URL aur SUPABASE_KEY daalein.'); return; }
+  if(!cloudOn()){ cloudStatus('off'); return; }
   var db=window.__vdcGetDb&&window.__vdcGetDb();
-  if(!db){ alert('Data nahin mila.'); return; }
+  if(!db){ cloudStatus('err'); return; }
   await vdcPush(db);
   if(typeof toast==='function') toast('Cloud par bhej diya: '+(db.entries||[]).length+' entries.');
 }
@@ -1590,7 +1629,7 @@ async function vdcPushAll(){
       +'background:#94a3b8;cursor:pointer;box-shadow:0 2px 10px rgba(0,0,0,.25);user-select:none';
     chip.title='Click: cloud se data laao  \u00b7  Double-click: sab kuch cloud par bhejo';
     chip.onclick=function(){ vdcPull(); };
-    chip.ondblclick=function(){ if(confirm('Sab data cloud par bhejein?')) vdcPushAll(); };
+    chip.ondblclick=function(){ if(window.__vdcAsk) window.__vdcAsk('Sab data cloud par bhejein?',vdcPushAll); else vdcPushAll(); };
     document.body.appendChild(chip);
     if(cloudOn()){ cloudStatus('ok'); setTimeout(function(){vdcPull(true);},1500); }
     else cloudStatus('off');

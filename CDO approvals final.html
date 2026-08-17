@@ -710,7 +710,7 @@
   <section id="note" class="page active">
     <div class="doc-actions no-print">
       <button class="btn btn-ghost" onclick="app.go(&#39;main&#39;)">← Back to Register</button>
-      <button class="btn btn-primary" onclick="app.printNote()">💾 Save as PDF</button>
+      <button class="btn btn-primary" onclick="app.savePDF()">💾 Save as PDF</button>
       <button class="btn btn-ghost" onclick="app.printNote()">🖨 Print</button>
     </div>
     <div class="sheet-wrap"><div class="sheet" id="note-sheet">
@@ -1076,12 +1076,141 @@ const app = (function(){
       e.approvalDate=new Date().toISOString().slice(0,10); persist(); }
     showDoc(buildNoteHTML(e));
   }
+  // ---- Print engine (works standalone AND inside Google Sites / iframe embeds) ----
+  const IN_FRAME = (function(){ try{ return window.self !== window.top; }catch(e){ return true; } })();
+
+  const PRINT_CSS = `
+    @page{size:A4;margin:0}
+    *{box-sizing:border-box}
+    html,body{background:#fff;margin:0;padding:0}
+    body{font-family:"Aptos","Aptos Display","Segoe UI",-apple-system,BlinkMacSystemFont,Arial,sans-serif}
+    .no-print{display:none !important}
+    .sheet{background:#fff;width:210mm;max-width:100%;min-height:297mm;padding:13mm 20mm 20mm;margin:0 auto;
+      color:#1a1a1a;font-size:12.5px;line-height:1.42;display:flex;flex-direction:column}
+    .sheet .lh{text-align:center;margin-bottom:4px}
+    .sheet .lh .logo-img{height:72px;width:auto;margin:0 auto;display:block}
+    .sheet hr{border:0;border-top:1px solid #9aa6b8;margin:12px 0 22px}
+    .sheet h3.doc-title{text-align:center;letter-spacing:1.5px;margin:0 0 26px;font-size:15px;font-weight:700}
+    .sheet .meta{margin:0 0 14px} .sheet .meta div{margin-bottom:3px}
+    .sheet p{margin:9px 0} .sheet u{text-underline-offset:2px}
+    .sheet ul{margin:8px 0 8px 8px;padding-left:22px} .sheet ul li{margin:4px 0}
+    .sheet .sig{margin-top:16px}
+    .sheet .cc{font-size:12px;margin-top:10px;font-style:italic}
+    .sheet .cc td{padding:1px 10px 1px 0;vertical-align:top;border:0;white-space:normal}
+    .kv{width:100%;border-collapse:collapse;font-size:12.5px}
+    .kv td{border:1px solid #cbd5e1;padding:5px 10px;vertical-align:top}
+    .kv td.k{background:#f1f5f9;font-weight:700;width:38%;white-space:normal}
+    .rpt{width:100%;border-collapse:collapse;font-size:11.5px}
+    .rpt th,.rpt td{border:1px solid #cbd5e1;padding:6px 8px;text-align:left;vertical-align:top;white-space:normal}
+    .rpt thead th{background:#f1f5f9;font-weight:700}
+    .sheet .credit{margin-top:auto;text-align:center;font-size:10px;color:#94a3b8;
+      border-top:1px solid #e5e9f0;padding-top:10px;letter-spacing:.3px}
+    @media print{ .sheet{width:100%;min-height:auto} }
+  `;
+
+  function buildPrintDoc(innerHTML){
+    return '<!DOCTYPE html><html><head><meta charset="utf-8">'
+      + '<meta name="viewport" content="width=device-width,initial-scale=1">'
+      + '<title>Document</title><style>' + PRINT_CSS + '</style></head><body>'
+      + '<div class="sheet">' + innerHTML + '</div>'
+      + '<scr' + 'ipt>window.onload=function(){setTimeout(function(){try{window.focus();window.print();}catch(e){}},350);};<\/scr' + 'ipt>'
+      + '</body></html>';
+  }
+
+  // Inside an iframe (Google Sites) window.print() is blocked by the sandbox,
+  // so we open a standalone window/tab and print from there.
+  function printViaWindow(innerHTML){
+    const html = buildPrintDoc(innerHTML);
+    let w = null;
+    try{ w = window.open("", "_blank"); }catch(e){ w = null; }
+    if(w && w.document){
+      try{
+        w.document.open(); w.document.write(html); w.document.close();
+        return true;
+      }catch(e){ try{ w.close(); }catch(e2){} }
+    }
+    // Fallback: blob URL in a new tab
+    try{
+      const blob = new Blob([html], {type:"text/html"});
+      const url  = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.target = "_blank"; a.rel = "noopener";
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(function(){ URL.revokeObjectURL(url); }, 60000);
+      toast("Naya tab khul raha hai — wahan se Print / Save as PDF karein");
+      return true;
+    }catch(e){}
+    toast("Popup blocked — browser me is site ke liye popups allow karein");
+    return false;
+  }
+
   function printSheet(innerHTML){
+    if(IN_FRAME){ printViaWindow(innerHTML); return; }
     const pd=$("#print-doc"); pd.innerHTML=`<div class="sheet">${innerHTML}</div>`;
     const done=()=>{ pd.innerHTML=""; window.removeEventListener("afterprint",done); };
     window.addEventListener("afterprint",done);
-    window.print();
+    try{
+      window.print();
+    }catch(e){
+      pd.innerHTML=""; window.removeEventListener("afterprint",done);
+      printViaWindow(innerHTML);
+    }
   }
+  // ---- Real PDF download (file system par .pdf save hota hai) ----
+  const H2P_SRC = "https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js";
+  let _h2pPromise = null;
+  function loadH2P(){
+    if(window.html2pdf) return Promise.resolve(true);
+    if(_h2pPromise) return _h2pPromise;
+    _h2pPromise = new Promise(function(res){
+      const sc=document.createElement("script");
+      sc.src=H2P_SRC;
+      sc.onload=function(){ res(!!window.html2pdf); };
+      sc.onerror=function(){ res(false); };
+      document.head.appendChild(sc);
+    });
+    return _h2pPromise;
+  }
+  function pdfFileName(){
+    const t=$("#note-sheet .doc-title");
+    let base=(t?t.textContent:"Document").trim().replace(/[\\/:*?"<>|]+/g,"").replace(/\s+/g,"_");
+    const ref=$("#note-sheet .meta");
+    let tag="";
+    if(ref){ const m=ref.textContent.match(/[A-Z]{2,}\/[A-Z0-9\/]+/); if(m) tag="_"+m[0].replace(/\//g,"-"); }
+    return (base||"Document")+tag+"_"+new Date().toISOString().slice(0,10)+".pdf";
+  }
+  function savePDF(){
+    const src=$("#note-sheet");
+    if(!src){ toast("Document nahi mila"); return; }
+    toast("PDF ban raha hai...");
+    loadH2P().then(function(ok){
+      if(!ok || !window.html2pdf){
+        toast("PDF library load nahi hui — Print se Save as PDF karein");
+        printNote(); return;
+      }
+      const holder=document.createElement("div");
+      holder.style.cssText="position:fixed;left:-10000px;top:0;width:210mm;background:#fff;z-index:-1";
+      const clone=src.cloneNode(true);
+      clone.style.cssText="width:210mm;min-height:auto;margin:0;box-shadow:none;border:0;background:#fff;padding:13mm 20mm 20mm;line-height:1.42";
+      holder.appendChild(clone);
+      document.body.appendChild(holder);
+      window.html2pdf().set({
+        margin:0,
+        filename: pdfFileName(),
+        image:{type:"jpeg",quality:0.98},
+        html2canvas:{scale:2,useCORS:true,backgroundColor:"#ffffff",logging:false},
+        jsPDF:{unit:"mm",format:"a4",orientation:"portrait"},
+        pagebreak:{mode:["css","legacy"]}
+      }).from(clone).save().then(function(){
+        toast("PDF save ho gaya");
+      }).catch(function(){
+        toast("PDF nahi bana — Print use karein");
+      }).then(function(){
+        if(holder.parentNode) holder.parentNode.removeChild(holder);
+      });
+    });
+  }
+
   function printNote(){ printSheet($("#note-sheet").innerHTML); }  // already includes credit
 
   function buildFormHTML(){
@@ -1479,7 +1608,7 @@ const app = (function(){
     tick(); setInterval(tick,30000);
   }
   document.addEventListener("DOMContentLoaded",init);
-  return {go,save,edit,del,resetForm,addMaster,editMaster,delMaster,exportCSV,pickFile,clearDoc,note,printNote,printForm,saveAndNote,
+  return {go,save,edit,del,resetForm,addMaster,editMaster,delMaster,exportCSV,pickFile,clearDoc,note,printNote,printForm,saveAndNote,savePDF,
           saveCloseout,resetCloseForm,onPickCloseProject,pickClFile,clearClDoc,closingReport,editCloseout,printAllClosings,
           handoverCertificate,renderReport,printReport,exportBackup,importBackup,addUser,delUser,login,logout,
           adminConfirm,adminCancel,editUser};

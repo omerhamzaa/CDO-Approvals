@@ -908,12 +908,13 @@ const app = (function(){
     arr.map(x=>`<option ${x===val?"selected":""}>${esc(x)}</option>`).join(""); }
   function fillOwner(val){ $("#f-owner").innerHTML = `<option value="" ${val?"":"selected"}>— none —</option>` +
     db.owners.map(x=>`<option ${x===val?"selected":""}>${esc(x)}</option>`).join(""); }
-  let docState = {};   // { index: {fileName, fileData} }
+  let docState = {};   // { index: {fileName, fileUrl, filePath, fileData} }
+  function fileHref(s){ return (s&&(s.fileUrl||s.fileData))||'#'; }
   function fileTagHtml(i){ const s=docState[i]; if(!s||!s.fileName) return "";
-    return `<a class="file-tag" href="${s.fileData||'#'}" download="${esc(s.fileName)}" target="_blank" title="${esc(s.fileName)}">📄 ${esc(s.fileName)}</a> <span class="icon-x" onclick="app.clearDoc(${i})">✕</span>`; }
+    return `<a class="file-tag" href="${fileHref(s)}" download="${esc(s.fileName)}" target="_blank" title="${esc(s.fileName)}">📄 ${esc(s.fileName)}</a> <span class="icon-x" onclick="app.clearDoc(${i})">✕</span>`; }
   function renderDocs(data={}){
     docState={};
-    DOC_TYPES.forEach((d,i)=>{ const dd=data[d]||{}; if(dd.fileName) docState[i]={fileName:dd.fileName,fileData:dd.fileData||""}; });
+    DOC_TYPES.forEach((d,i)=>{ const dd=data[d]||{}; if(dd.fileName) docState[i]={fileName:dd.fileName,fileUrl:dd.fileUrl||"",filePath:dd.filePath||"",fileData:dd.fileData||""}; });
     $("#docs").innerHTML = DOC_TYPES.map((d,i)=>`
       <div class="doc-row">
         <input type="checkbox" id="doc-chk-${i}" ${data[d]?.attached?"checked":""} onchange="app.docChanged(${i})">
@@ -927,11 +928,30 @@ const app = (function(){
       </div>`).join("");
   }
   function pickFile(i,input){ const f=input.files[0]; if(!f) return;
+    const folder = ($("#edit-id").value || ("e"+db.seq));
+    attachFile(f, "entry/"+folder+"/"+i, function(st){
+      docState[i]=st;
+      const chk=$("#doc-chk-"+i); if(chk) chk.checked=true;
+      $("#doc-fname-"+i).innerHTML=fileTagHtml(i); docChanged(i);
+    });
+  }
+  /* Shared uploader: pehle Supabase bucket try karta hai, na chale to
+     purana base64 tareeqa (taake app offline bhi kaam karti rahe). */
+  function attachFile(f, pathPrefix, done){
+    if(window.vdcUpload){
+      window.vdcUpload(pathPrefix+"-"+f.name, f)
+        .then(function(r){ done({fileName:f.name, fileUrl:r.url, filePath:r.path, fileData:""}); })
+        .catch(function(e){ console.warn("upload failed, using local copy",e);
+          toast("Upload failed — file is kept in this browser only");
+          base64Fallback(f,done); });
+      return;
+    }
+    base64Fallback(f,done);
+  }
+  function base64Fallback(f,done){
     if(f.size>3*1024*1024) toast("File over 3MB — a Drive link is more reliable");
     const r=new FileReader();
-    r.onload=()=>{ docState[i]={fileName:f.name,fileData:r.result};
-      const chk=$("#doc-chk-"+i); if(chk) chk.checked=true;
-      $("#doc-fname-"+i).innerHTML=fileTagHtml(i); docChanged(i); };
+    r.onload=()=>done({fileName:f.name, fileUrl:"", filePath:"", fileData:r.result});
     r.readAsDataURL(f);
   }
   // ---- Auto-approve: "Directors Approval" attach hote hi status Approved ----
@@ -964,7 +984,8 @@ const app = (function(){
     $("#entry-title").textContent="Data Entry Form"; prepForm(); }
   function collectDocs(){ const o={}; DOC_TYPES.forEach((d,i)=>{ const st=docState[i]||{};
     o[d]={attached:$("#doc-chk-"+i).checked, link:$("#doc-link-"+i).value.trim(),
-          fileName:st.fileName||"", fileData:st.fileData||""}; }); return o; }
+          fileName:st.fileName||"", fileUrl:st.fileUrl||"", filePath:st.filePath||"",
+          fileData:st.fileUrl? "" : (st.fileData||"")}; }); return o; }
 
   function commitEntry(){   // returns saved id, or null if invalid
     if(!$("#f-project").value){ toast("Pick a project name"); return null; }
@@ -1179,17 +1200,34 @@ const app = (function(){
     return false;
   }
 
+  /* Bucket wali tasveerein network se aati hain — print se pehle unka
+     load hona zaroori hai, warna khali page chhap jata hai. */
+  function waitForImages(root, ms){
+    const imgs=Array.prototype.slice.call(root.querySelectorAll("img"))
+      .filter(function(im){ return !im.complete || !im.naturalWidth; });
+    if(!imgs.length) return Promise.resolve();
+    return new Promise(function(res){
+      let left=imgs.length, fired=false;
+      const finish=function(){ if(!fired){ fired=true; res(); } };
+      const tick=function(){ if(--left<=0) finish(); };
+      imgs.forEach(function(im){ im.addEventListener("load",tick,{once:true});
+                                 im.addEventListener("error",tick,{once:true}); });
+      setTimeout(finish, ms||10000);
+    });
+  }
   function printSheet(innerHTML){
     if(IN_FRAME){ printViaWindow(innerHTML); return; }
     const pd=$("#print-doc"); pd.innerHTML=`<div class="sheet">${innerHTML}</div>`;
     const done=()=>{ pd.innerHTML=""; window.removeEventListener("afterprint",done); };
     window.addEventListener("afterprint",done);
-    try{
-      window.print();
-    }catch(e){
-      pd.innerHTML=""; window.removeEventListener("afterprint",done);
-      printViaWindow(innerHTML);
-    }
+    waitForImages(pd).then(function(){
+      try{
+        window.print();
+      }catch(e){
+        pd.innerHTML=""; window.removeEventListener("afterprint",done);
+        printViaWindow(innerHTML);
+      }
+    });
   }
   // ---- Real PDF download (file system par .pdf save hota hai) ----
   const H2P_SRC = "https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js";
@@ -1316,12 +1354,19 @@ const app = (function(){
     });
     return _pdfjsPromise;
   }
-  function pdfToImages(dataUrl, maxPages){
+  function pdfToImages(src, maxPages){
     return loadPdfJs().then(function(ok){
       if(!ok) return null;
-      const b64=dataUrl.split(",")[1]||""; const bin=atob(b64); const bytes=new Uint8Array(bin.length);
-      for(let i=0;i<bin.length;i++) bytes[i]=bin.charCodeAt(i);
-      return window.pdfjsLib.getDocument({data:bytes}).promise.then(function(pdf){
+      /* src ya to purani base64 data-URL hai, ya bucket ka http link */
+      let task;
+      if(/^data:/i.test(src)){
+        const b64=src.split(",")[1]||""; const bin=atob(b64); const bytes=new Uint8Array(bin.length);
+        for(let i=0;i<bin.length;i++) bytes[i]=bin.charCodeAt(i);
+        task = window.pdfjsLib.getDocument({data:bytes});
+      } else {
+        task = window.pdfjsLib.getDocument(src);
+      }
+      return task.promise.then(function(pdf){
         const n=Math.min(pdf.numPages, maxPages||30); const out=[];
         let chain=Promise.resolve();
         for(let p=1;p<=n;p++){ (function(p){ chain=chain.then(function(){ return pdf.getPage(p).then(function(page){
@@ -1339,8 +1384,8 @@ const app = (function(){
   function buildAttachmentPages(e){
     const docs=e.docs||{}; const tasks=[];
     DOC_TYPES.forEach(function(d){ const dd=docs[d]; if(!dd) return;
-      const data=dd.fileData||dd.data||"";
-      const head=`<div class="att-h">\U0001F4CE Attachment — ${esc(d)}${dd.fileName?" — "+esc(dd.fileName):""} &nbsp;|&nbsp; ${esc(e.formno||"")} · ${esc(e.project||"")}</div>`;
+      const data=dd.fileUrl||dd.fileData||dd.data||"";
+      const head=`<div class="att-h">📎 Attachment — ${esc(d)}${dd.fileName?" — "+esc(dd.fileName):""} &nbsp;|&nbsp; ${esc(e.formno||"")} · ${esc(e.project||"")}</div>`;
       if(data && isImg(dd.fileName,data)){
         tasks.push(Promise.resolve(`<div class="att-page">${head}<img src="${data}" alt="${esc(dd.fileName)}"></div>`));
       } else if(data && isPdf(dd.fileName,data)){
@@ -1354,7 +1399,7 @@ const app = (function(){
       } else if(dd.link){
         tasks.push(Promise.resolve(`<div class="att-page">${head}<p class="att-note">Link attached: <a href="${esc(dd.link)}">${esc(dd.link)}</a></p></div>`));
       } else if(dd.fileName){
-        tasks.push(Promise.resolve(`<div class="att-page">${head}<p class="att-note">File <strong>${esc(dd.fileName)}</strong> was attached, but its contents are not available on this device (attachments are stored locally on the computer where they were uploaded). Re-attach the file from Data Entry → Edit to include it in the printout.</p></div>`));
+        tasks.push(Promise.resolve(`<div class="att-page">${head}<p class="att-note">File <strong>${esc(dd.fileName)}</strong> was attached before cloud storage was enabled, so only its name was saved. Open Data Entry → Edit, re-attach the same file, and save — it will then upload to cloud storage and appear here on every device.</p></div>`));
       } else if(dd.attached){
         tasks.push(Promise.resolve(`<div class="att-page">${head}<p class="att-note">Marked as attached (hard copy) — no file or link was uploaded.</p></div>`));
       }
@@ -1378,16 +1423,16 @@ const app = (function(){
   }
 
   // ---- Closeout / Handover ----
-  let clDocState = {};   // { index:{fileName,fileData} }
+  let clDocState = {};   // { index:{fileName,fileUrl,filePath,fileData} }
   function clTagHtml(i){ const s=clDocState[i]; if(!s||!s.fileName) return "";
-    return `<a class="file-tag" href="${s.fileData||'#'}" download="${esc(s.fileName)}" target="_blank" title="${esc(s.fileName)}">📄 ${esc(s.fileName)}</a> <span class="icon-x" onclick="app.clearClDoc(${i})">✕</span>`; }
+    return `<a class="file-tag" href="${fileHref(s)}" download="${esc(s.fileName)}" target="_blank" title="${esc(s.fileName)}">📄 ${esc(s.fileName)}</a> <span class="icon-x" onclick="app.clearClDoc(${i})">✕</span>`; }
   function fillCloseProjects(sel=""){
     const opts = db.entries.map(e=>`<option value="${e.id}" ${e.id===sel?"selected":""}>${esc(e.project)} — ${esc(e.location)} (${esc(e.formno)})</option>`).join("");
     $("#cl-project").innerHTML = `<option value="" disabled ${sel?"":"selected"}>Select a project…</option>`+opts;
   }
   function renderCloseDocs(data={}){
     clDocState={};
-    CLOSE_DOCS.forEach((d,i)=>{ const dd=data[d]||{}; if(dd.fileName) clDocState[i]={fileName:dd.fileName,fileData:dd.fileData||""}; });
+    CLOSE_DOCS.forEach((d,i)=>{ const dd=data[d]||{}; if(dd.fileName) clDocState[i]={fileName:dd.fileName,fileUrl:dd.fileUrl||"",filePath:dd.filePath||"",fileData:dd.fileData||""}; });
     $("#close-docs").innerHTML = CLOSE_DOCS.map((d,i)=>`
       <div class="doc-row">
         <input type="checkbox" id="cl-chk-${i}" ${data[d]?.attached?"checked":""}>
@@ -1401,17 +1446,18 @@ const app = (function(){
       </div>`).join("");
   }
   function pickClFile(i,input){ const f=input.files[0]; if(!f) return;
-    if(f.size>3*1024*1024) toast("File over 3MB — a Drive link is more reliable");
-    const r=new FileReader();
-    r.onload=()=>{ clDocState[i]={fileName:f.name,fileData:r.result};
-      const c=$("#cl-chk-"+i); if(c) c.checked=true; $("#cl-fname-"+i).innerHTML=clTagHtml(i); };
-    r.readAsDataURL(f);
+    const folder = ($("#cl-project").value || "unassigned");
+    attachFile(f, "closeout/"+folder+"/"+i, function(st){
+      clDocState[i]=st;
+      const c=$("#cl-chk-"+i); if(c) c.checked=true; $("#cl-fname-"+i).innerHTML=clTagHtml(i);
+    });
   }
   function clearClDoc(i){ delete clDocState[i]; const s=$("#cl-fname-"+i); if(s) s.innerHTML="";
     const f=$("#cl-file-"+i); if(f) f.value=""; }
   function collectClDocs(){ const o={}; CLOSE_DOCS.forEach((d,i)=>{ const st=clDocState[i]||{};
     o[d]={attached:$("#cl-chk-"+i).checked, link:$("#cl-link-"+i).value.trim(),
-          fileName:st.fileName||"", fileData:st.fileData||""}; }); return o; }
+          fileName:st.fileName||"", fileUrl:st.fileUrl||"", filePath:st.filePath||"",
+          fileData:st.fileUrl? "" : (st.fileData||"")}; }); return o; }
   function onPickCloseProject(){
     const e=db.entries.find(x=>x.id===$("#cl-project").value); if(!e){ renderCloseDocs(); return; }
     const c=e.closeout||{};
@@ -1839,6 +1885,27 @@ function cloudStatus(state,msg){
   var m=map[state]||map.off;
   el.style.background=m[0]; el.textContent=msg||m[1];
 }
+
+/* ---------- STORAGE BUCKET (pictures + documents) ----------
+   File ab records.data ke andar base64 ban kar nahin jati.
+   Ye bucket mein upload hoti hai, aur sirf uska URL DB mein save hota hai. */
+const VDC_BUCKET = 'vdc-files';
+
+window.vdcUpload = async function(path, file){
+  if(!cloudOn()) throw new Error('cloud off');
+  /* path saaf karo: spaces/urdu/brackets sab hata do warna Storage reject karti hai */
+  var clean = String(path).replace(/[^A-Za-z0-9._\/-]+/g,'_').replace(/_+/g,'_');
+  var res = await fetch(SUPABASE_URL+'/storage/v1/object/'+VDC_BUCKET+'/'+clean,{
+    method:'POST',
+    headers:supaHeaders({
+      'Content-Type': file.type || 'application/octet-stream',
+      'x-upsert':'true'          // wohi naam dobara aaye to overwrite
+    }),
+    body:file});
+  if(!res.ok) throw new Error('upload '+res.status+' '+(await res.text()));
+  return { path:clean,
+           url:SUPABASE_URL+'/storage/v1/object/public/'+VDC_BUCKET+'/'+encodeURI(clean) };
+};
 
 async function supaPull(type){
   var url=SUPABASE_URL+'/rest/v1/records'

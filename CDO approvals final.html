@@ -1666,6 +1666,10 @@ const app = (function(){
      chup-chaap block ho jata hai. Is liye frame ke andar hum file ko ek naye
      top-level tab ko de dete hain, jahan se download normally chalta hai. ---- */
   function deliverFile(name, text, mime){
+    /* Google Sites ka iframe sandboxed hai (allow-downloads nahin hota), is liye
+       frame ke andar blob download chup-chaap block ho jata hai. Wahan hum file
+       Supabase bucket par upload kar ke uska link dete hain. */
+    if(IN_FRAME){ frameDeliver(name, text, mime); return true; }
     if(!IN_FRAME){
       try{
         const blob=new Blob([text],{type:mime});
@@ -1704,6 +1708,66 @@ const app = (function(){
     toast("Popup blocked — browser me is site ke liye popups allow karein");
     return false;
   }
+  /* ---- frame ke andar file dene ka tareeqa: bucket par upload + link ---- */
+  function shareBox(html){
+    var old=document.getElementById("share-box"); if(old) old.remove();
+    var w=document.createElement("div"); w.id="share-box";
+    w.setAttribute("style","position:fixed;inset:0;z-index:9999;background:rgba(15,23,42,.55);"+
+      "display:flex;align-items:center;justify-content:center;padding:18px");
+    w.innerHTML='<div style="background:#fff;border-radius:14px;max-width:520px;width:100%;padding:22px 22px 18px;'+
+      'font-family:system-ui,Segoe UI,Arial,sans-serif;color:#0f172a;box-shadow:0 18px 50px rgba(0,0,0,.35)">'+html+'</div>';
+    w.addEventListener("click",function(e){ if(e.target===w) w.remove(); });
+    document.body.appendChild(w); return w;
+  }
+  function closeShareBox(){ var b=document.getElementById("share-box"); if(b) b.remove(); }
+  function shareBoxLink(name, url){
+    var safe=esc(url);
+    shareBox('<h3 style="margin:0 0 6px;font-size:17px">\uD83D\uDD17 Link ready</h3>'+
+      '<p style="margin:0 0 12px;color:#475569;font-size:13px">'+esc(name)+' — ye link kisi ko bhi bhejein, wo browser me app '+
+      'poore data ke sath khol lega.</p>'+
+      '<input id="sb-url" readonly value="'+safe+'" style="width:100%;padding:9px;border:1px solid #cbd5e1;border-radius:8px;'+
+      'font-size:12px;color:#0f172a;margin-bottom:12px">'+
+      '<div style="display:flex;gap:8px;flex-wrap:wrap">'+
+      '<button id="sb-copy" style="padding:9px 14px;border:0;border-radius:8px;background:#15803d;color:#fff;font-weight:600;cursor:pointer">Copy link</button>'+
+      '<a href="'+safe+'" target="_blank" rel="noopener" style="padding:9px 14px;border-radius:8px;background:#1d4ed8;color:#fff;'+
+      'font-weight:600;text-decoration:none">Open</a>'+
+      '<a href="https://wa.me/?text='+encodeURIComponent(url)+'" target="_blank" rel="noopener" style="padding:9px 14px;'+
+      'border-radius:8px;background:#059669;color:#fff;font-weight:600;text-decoration:none">WhatsApp</a>'+
+      '<button id="sb-close" style="padding:9px 14px;border:1px solid #cbd5e1;border-radius:8px;background:#fff;cursor:pointer">Close</button>'+
+      '</div>');
+    var inp=document.getElementById("sb-url");
+    document.getElementById("sb-copy").onclick=function(){
+      try{ inp.select(); inp.setSelectionRange(0,99999); }catch(e){}
+      var done=false;
+      try{ done=document.execCommand("copy"); }catch(e){}
+      if(!done && navigator.clipboard) navigator.clipboard.writeText(url);
+      this.textContent="Copied \u2713";
+    };
+    document.getElementById("sb-close").onclick=closeShareBox;
+  }
+  function shareBoxFallback(name, msg){
+    var appUrl=location.href.split("#")[0]+"#share";
+    shareBox('<h3 style="margin:0 0 6px;font-size:17px">\u26A0 Download blocked here</h3>'+
+      '<p style="margin:0 0 12px;color:#475569;font-size:13px">Google Site ke andar browser download block kar deta hai'+
+      (msg?" ("+esc(msg)+")":"")+'. Neeche button se app naye tab me kholein — wahan se file seedha download ho jayegi.</p>'+
+      '<div style="display:flex;gap:8px;flex-wrap:wrap">'+
+      '<a href="'+esc(appUrl)+'" target="_blank" rel="noopener" style="padding:9px 14px;border-radius:8px;background:#1d4ed8;'+
+      'color:#fff;font-weight:600;text-decoration:none">Open app in new tab</a>'+
+      '<button id="sb-close" style="padding:9px 14px;border:1px solid #cbd5e1;border-radius:8px;background:#fff;cursor:pointer">Close</button>'+
+      '</div>');
+    document.getElementById("sb-close").onclick=closeShareBox;
+  }
+  function frameDeliver(name, text, mime){
+    shareBox('<h3 style="margin:0 0 6px;font-size:17px">\u2601 Preparing link\u2026</h3>'+
+      '<p style="margin:0;color:#475569;font-size:13px">'+esc(name)+' upload ho rahi hai, ek lamha\u2026</p>');
+    if(!window.vdcUpload){ shareBoxFallback(name,"cloud off"); return; }
+    var blob;
+    try{ blob=new Blob([text],{type:mime}); }catch(e){ shareBoxFallback(name,"blob"); return; }
+    var stamp=new Date().toISOString().replace(/[:.]/g,"-");
+    window.vdcUpload("shares/"+stamp+"-"+name, blob)
+      .then(function(r){ shareBoxLink(name, r.url); })
+      .catch(function(e){ console.warn("share upload failed",e); shareBoxFallback(name, "upload failed"); });
+  }
   // ---- Share App: poori app + saara data ek HTML file me download ----
   function shareApp(){
     try{
@@ -1715,6 +1779,7 @@ const app = (function(){
       if(pd) pd.innerHTML="";
       const chips=[...document.querySelectorAll("#cloudChip")]; chips.forEach(c=>c.remove());
       document.querySelectorAll("#yn-gate,#admin-gate.open").forEach(n=>{ if(n.id==="yn-gate") n.remove(); });
+      { const sb=document.getElementById("share-box"); if(sb) sb.remove(); }
       let html="<!DOCTYPE html>\n"+document.documentElement.outerHTML;
       if(pd) pd.innerHTML=pdHTML;
       chips.forEach(c=>document.body.appendChild(c));
@@ -1854,12 +1919,17 @@ const app = (function(){
     const c=$("#clock"); const tick=()=>c.textContent=new Date().toLocaleString(undefined,
       {weekday:"short",day:"2-digit",month:"short",year:"numeric",hour:"2-digit",minute:"2-digit"});
     tick(); setInterval(tick,30000);
+    /* frame se "Open app in new tab" par aaye hain to file yahin bana kar de do */
+    if(!IN_FRAME && /(^|#)share/.test(location.hash)){
+      history.replaceState(null,"",location.href.split("#")[0]);
+      setTimeout(shareApp,900);
+    }
   }
   document.addEventListener("DOMContentLoaded",init);
   return {go,save,edit,del,resetForm,addMaster,editMaster,delMaster,exportCSV,pickFile,clearDoc,docChanged,note,printNote,printForm,saveAndNote,savePDF,
           saveCloseout,resetCloseForm,onPickCloseProject,pickClFile,clearClDoc,closingReport,editCloseout,printAllClosings,
           handoverCertificate,renderReport,printReport,printEntryForm,printAllForms,shareApp,exportBackup,importBackup,addUser,delUser,login,logout,
-          adminConfirm,adminCancel,editUser};
+          adminConfirm,adminCancel,editUser,closeShareBox};
 })();
 </script>
 

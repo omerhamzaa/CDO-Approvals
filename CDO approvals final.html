@@ -581,7 +581,7 @@
         <div class="card-head"><div><h2>Backup &amp; Restore</h2>
           <div class="sub">Export all data as a JSON file, or import a backup to restore</div></div></div>
         <div class="card-body">
-          <p class="muted" style="margin-top:0">Your data (projects, closeouts, master lists, users) lives in this browser. Export a backup regularly, and import it on another device to move everything across.</p>
+          <p class="muted" style="margin-top:0">Your data (projects, closeouts, master lists, users) is saved in the linked Google Sheet, with a working copy in this browser. Export a backup now and then as an extra safety copy.</p>
           <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:8px">
             <button class="btn btn-primary" onclick="app.exportBackup()">⬇ Export Backup (JSON)</button>
             <label class="btn btn-ghost" style="cursor:pointer">⬆ Import Backup (JSON)
@@ -701,6 +701,25 @@
             </div>
           </div>
         </div>
+      </div>
+    </div>
+    </div>
+    <div style="margin-top:20px">
+    <div class="card">
+      <div class="card-head">
+        <div><h2>Google Sheet Sync</h2>
+          <div class="sub">All entries, master lists and users are saved in the linked Google Sheet</div></div>
+        <div class="pill" id="gs-build"></div>
+      </div>
+      <div class="card-body">
+        <p id="gs-status" style="margin-top:0;font-weight:600">—</p>
+        <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:8px">
+          <button class="btn btn-primary" onclick="vdcSheet.syncNow()">🔄 Sync now</button>
+          <button class="btn btn-ghost" onclick="vdcSheet.upload()" title="First-time use: adds this browser's entries that are missing in the sheet. Never overwrites sheet rows.">⬆ Upload this browser's data to Sheet</button>
+          <button class="btn btn-ghost" onclick="vdcSheet.moveFiles()" title="Copies attachments that are still on old links (or only in this browser) into the Google Drive folder">📁 Move old attachments to Google Drive</button>
+          <a id="gs-open" class="btn btn-ghost" target="_blank" rel="noopener" style="display:none;text-decoration:none">📗 Open Google Sheet</a>
+        </div>
+        <p id="gs-files" class="muted" style="margin:12px 0 0"></p>
       </div>
     </div>
     </div>
@@ -827,6 +846,9 @@ const app = (function(){
     try{ if(window.vdcCloudSave) window.vdcCloudSave(db); }catch(e){} }
   /* cloud sync ke liye db andar/bahar */
   window.__vdcGetDb=function(){ return db; };
+  window.__vdcStore=function(){ const s=JSON.stringify(db); try{ localStorage.setItem(KEY,s); mem=s; }catch(e){ mem=s; } };
+  window.__vdcToast=function(m){ toast(m); };
+  window.__vdcAdmin=function(cb,msg){ requireAdmin(cb,msg); };
   window.__vdcSetDb=function(o){
     if(!o) return;
     db={...structuredClone(DEFAULT),...o};
@@ -935,7 +957,7 @@ const app = (function(){
       $("#doc-fname-"+i).innerHTML=fileTagHtml(i); docChanged(i);
     });
   }
-  /* Shared uploader: pehle Supabase bucket try karta hai, na chale to
+  /* Shared uploader: pehle Google Drive (Apps Script) par upload karta hai, na chale to
      purana base64 tareeqa (taake app offline bhi kaam karti rahe). */
   function attachFile(f, pathPrefix, done){
     if(window.vdcUpload){
@@ -1005,6 +1027,7 @@ const app = (function(){
     // preserve existing approval/closeout metadata on edit
     if(id){ const cur=db.entries.find(e=>e.id===id)||{};
       rec.approvalRef=cur.approvalRef; rec.approvalDate=cur.approvalDate; rec.closeout=cur.closeout;
+      if(cur._rev!=null) rec._rev=cur._rev;
       const idx=db.entries.findIndex(e=>e.id===id); db.entries[idx]=rec; toast("Entry updated"); }
     else { db.entries.push(rec); db.seq++; toast("Saved to register"); }
     persist(); renderSummary($("#search").value);
@@ -1040,6 +1063,7 @@ const app = (function(){
   function del(id){ requireAdmin(()=>{
       askYesNo("Delete this entry? Ye wapas nahin aayegi.", function(){
         db.entries=db.entries.filter(e=>e.id!==id);
+        try{ if(window.vdcCloudDelete) window.vdcCloudDelete(id); }catch(e){}
         persist(); renderSummary($("#search").value); toast("Entry deleted");
       });
     }, "Deleting a saved record needs admin approval."); }
@@ -1200,7 +1224,7 @@ const app = (function(){
     return false;
   }
 
-  /* Bucket wali tasveerein network se aati hain — print se pehle unka
+  /* Cloud wali tasveerein network se aati hain — print se pehle unka
      load hona zaroori hai, warna khali page chhap jata hai. */
   function waitForImages(root, ms){
     const imgs=Array.prototype.slice.call(root.querySelectorAll("img"))
@@ -1357,7 +1381,7 @@ const app = (function(){
   function pdfToImages(src, maxPages){
     return loadPdfJs().then(function(ok){
       if(!ok) return null;
-      /* src ya to purani base64 data-URL hai, ya bucket ka http link */
+      /* src ya to base64 data-URL hai, ya purana http link */
       let task;
       if(/^data:/i.test(src)){
         const b64=src.split(",")[1]||""; const bin=atob(b64); const bytes=new Uint8Array(bin.length);
@@ -1384,25 +1408,33 @@ const app = (function(){
   function buildAttachmentPages(e){
     const docs=e.docs||{}; const tasks=[];
     DOC_TYPES.forEach(function(d){ const dd=docs[d]; if(!dd) return;
-      const data=dd.fileUrl||dd.fileData||dd.data||"";
       const head=`<div class="att-h">📎 Attachment — ${esc(d)}${dd.fileName?" — "+esc(dd.fileName):""} &nbsp;|&nbsp; ${esc(e.formno||"")} · ${esc(e.project||"")}</div>`;
-      if(data && isImg(dd.fileName,data)){
-        tasks.push(Promise.resolve(`<div class="att-page">${head}<img src="${data}" alt="${esc(dd.fileName)}"></div>`));
-      } else if(data && isPdf(dd.fileName,data)){
-        tasks.push(pdfToImages(data,30).then(function(r){
-          if(!r||!r.imgs.length) return `<div class="att-page">${head}<p class="att-note">PDF file attached (${esc(dd.fileName)}) — preview could not be rendered; open the file from the register.</p></div>`;
-          const more=r.total>r.imgs.length?`<p class="att-note">(First ${r.imgs.length} of ${r.total} pages printed)</p>`:"";
-          return r.imgs.map(function(src,i){ return `<div class="att-page">${head}<div class="att-note" style="text-align:right;margin:0 0 4px">Page ${i+1} / ${r.total}</div><img src="${src}" alt="page ${i+1}"></div>`; }).join("")+more;
-        }));
-      } else if(data){
-        tasks.push(Promise.resolve(`<div class="att-page">${head}<p class="att-note">File attached: <strong>${esc(dd.fileName)}</strong> — this file type cannot be previewed in print (images / PDF only). Open the file from the register.</p></div>`));
-      } else if(dd.link){
-        tasks.push(Promise.resolve(`<div class="att-page">${head}<p class="att-note">Link attached: <a href="${esc(dd.link)}">${esc(dd.link)}</a></p></div>`));
-      } else if(dd.fileName){
-        tasks.push(Promise.resolve(`<div class="att-page">${head}<p class="att-note">File <strong>${esc(dd.fileName)}</strong> was attached before cloud storage was enabled, so only its name was saved. Open Data Entry → Edit, re-attach the same file, and save — it will then upload to cloud storage and appear here on every device.</p></div>`));
-      } else if(dd.attached){
-        tasks.push(Promise.resolve(`<div class="att-page">${head}<p class="att-note">Marked as attached (hard copy) — no file or link was uploaded.</p></div>`));
-      }
+      /* Google Drive wali file ka asal data API se aata hai (Drive ka link seedha print me nahin chalta) */
+      const onDrive=/^drive:/.test(dd.filePath||"");
+      const pre=(onDrive && window.vdcFileData) ? window.vdcFileData(dd).catch(function(){ return null; }) : Promise.resolve(null);
+      tasks.push(pre.then(function(got){
+        const data=got||(onDrive?"":(dd.fileUrl||dd.fileData||dd.data||""));
+        if(data && isImg(dd.fileName,data)){
+          return `<div class="att-page">${head}<img src="${data}" alt="${esc(dd.fileName)}"></div>`;
+        } else if(data && isPdf(dd.fileName,data)){
+          return pdfToImages(data,30).then(function(r){
+            if(!r||!r.imgs.length) return `<div class="att-page">${head}<p class="att-note">PDF file attached (${esc(dd.fileName)}) — preview could not be rendered; open the file from the register.</p></div>`;
+            const more=r.total>r.imgs.length?`<p class="att-note">(First ${r.imgs.length} of ${r.total} pages printed)</p>`:"";
+            return r.imgs.map(function(src,i){ return `<div class="att-page">${head}<div class="att-note" style="text-align:right;margin:0 0 4px">Page ${i+1} / ${r.total}</div><img src="${src}" alt="page ${i+1}"></div>`; }).join("")+more;
+          });
+        } else if(data){
+          return `<div class="att-page">${head}<p class="att-note">File attached: <strong>${esc(dd.fileName)}</strong> — this file type cannot be previewed in print (images / PDF only). Open the file from the register.</p></div>`;
+        } else if(onDrive && dd.fileUrl){
+          return `<div class="att-page">${head}<p class="att-note">File attached: <strong>${esc(dd.fileName)}</strong> — could not be loaded for print right now. Open it here: <a href="${esc(dd.fileUrl)}">${esc(dd.fileUrl)}</a></p></div>`;
+        } else if(dd.link){
+          return `<div class="att-page">${head}<p class="att-note">Link attached: <a href="${esc(dd.link)}">${esc(dd.link)}</a></p></div>`;
+        } else if(dd.fileName){
+          return `<div class="att-page">${head}<p class="att-note">File <strong>${esc(dd.fileName)}</strong> was attached before cloud storage was enabled, so only its name was saved. Open Data Entry → Edit, re-attach the same file, and save — it will then upload to cloud storage and appear here on every device.</p></div>`;
+        } else if(dd.attached){
+          return `<div class="att-page">${head}<p class="att-note">Marked as attached (hard copy) — no file or link was uploaded.</p></div>`;
+        }
+        return "";
+      }));
     });
     return Promise.all(tasks).then(function(parts){ return parts.join(""); });
   }
@@ -1668,7 +1700,7 @@ const app = (function(){
   function deliverFile(name, text, mime){
     /* Google Sites ka iframe sandboxed hai (allow-downloads nahin hota), is liye
        frame ke andar blob download chup-chaap block ho jata hai. Wahan hum file
-       Supabase bucket par upload kar ke uska link dete hain. */
+       Google Drive par upload kar ke uska link dete hain. */
     if(IN_FRAME){ frameDeliver(name, text, mime); return true; }
     if(!IN_FRAME){
       try{
@@ -1708,7 +1740,7 @@ const app = (function(){
     toast("Popup blocked — browser me is site ke liye popups allow karein");
     return false;
   }
-  /* ---- frame ke andar file dene ka tareeqa: bucket par upload + link ---- */
+  /* ---- frame ke andar file dene ka tareeqa: Google Drive par upload + link ---- */
   function shareBox(html){
     var old=document.getElementById("share-box"); if(old) old.remove();
     var w=document.createElement("div"); w.id="share-box";
@@ -1723,8 +1755,8 @@ const app = (function(){
   function shareBoxLink(name, url){
     var safe=esc(url);
     shareBox('<h3 style="margin:0 0 6px;font-size:17px">\uD83D\uDD17 Link ready</h3>'+
-      '<p style="margin:0 0 12px;color:#475569;font-size:13px">'+esc(name)+' — ye link kisi ko bhi bhejein, wo browser me app '+
-      'poore data ke sath khol lega.</p>'+
+      '<p style="margin:0 0 12px;color:#475569;font-size:13px">'+esc(name)+' — ye Google Drive link kisi ko bhi bhejein; wahan se file download '+
+      'kar ke browser me khol lein.</p>'+
       '<input id="sb-url" readonly value="'+safe+'" style="width:100%;padding:9px;border:1px solid #cbd5e1;border-radius:8px;'+
       'font-size:12px;color:#0f172a;margin-bottom:12px">'+
       '<div style="display:flex;gap:8px;flex-wrap:wrap">'+
@@ -1835,12 +1867,12 @@ const app = (function(){
   function login(){ const u=$("#lg-user").value.trim(), p=$("#lg-pass").value;
     const found=db.users.find(x=>x.username.toLowerCase()===u.toLowerCase() && x.password===p);
     if(!found){ $("#lg-err").textContent="Invalid username or password"; return; }
-    authed=true; $("#lg-err").textContent=""; $("#lg-pass").value="";
+    authed=true; window.__vdcUserName=found.username; $("#lg-err").textContent=""; $("#lg-pass").value="";
     $("#login").style.display="none";
     $("#who").textContent="👤 "+found.username; $("#logout-btn").style.display="inline-flex";
     go("main");   // login ke baad hamesha Main Page
   }
-  function logout(){ authed=false; setupUnlocked=false; $("#lg-pass").value=""; $("#login").style.display="flex";
+  function logout(){ authed=false; window.__vdcUserName=""; setupUnlocked=false; $("#lg-pass").value=""; $("#login").style.display="flex";
     $("#logout-btn").style.display="none"; $("#who").textContent=""; fillLoginUsers(); }
 
   // ---- admin verification gate ----
@@ -1849,7 +1881,7 @@ const app = (function(){
      Google Sites app ko sandboxed iframe mein chalata hai jahan browser
      confirm()/alert() block kar deta hai aur chup-chaap false wapas karta hai.
      Us wajah se delete kabhi chalta hi nahin tha. Ab apna HTML popup. ---- */
-  function askYesNo(message, onYes){
+  function askYesNo(message, onYes, yesLabel){
     var old=document.getElementById('yn-gate'); if(old) old.remove();
     var wrap=document.createElement('div');
     wrap.id='yn-gate';
@@ -1868,9 +1900,9 @@ const app = (function(){
     no.style.cssText='padding:8px 16px;border-radius:8px;border:1px solid #cbd5e1;'
       +'background:#fff;cursor:pointer;font:inherit';
     var yes=document.createElement('button');
-    yes.textContent='Yes, delete';
+    yes.textContent=yesLabel||'Yes, delete';
     yes.style.cssText='padding:8px 16px;border-radius:8px;border:0;'
-      +'background:#dc2626;color:#fff;cursor:pointer;font:inherit;font-weight:600';
+      +'background:'+(yesLabel?'#1d4ed8':'#dc2626')+';color:#fff;cursor:pointer;font:inherit;font-weight:600';
     no.onclick=function(){ wrap.remove(); };
     yes.onclick=function(){ wrap.remove(); try{ onYes(); }catch(e){ console.warn(e); } };
     row.appendChild(no); row.appendChild(yes);
@@ -1935,204 +1967,512 @@ const app = (function(){
 
 
 <!-- ================================================================
-     SUPABASE CLOUD SYNC  —  VDC Projects Approval Register
+     GOOGLE SHEET SYNC  —  CDO Projects Approval Register
+     Backend: Google Apps Script web app (Code.gs) jo Google Sheet se juri hai.
+       GET    -> saara data parhna
+       POST   -> nayi entry
+       UPDATE -> entry badalna      (POST action:"update")
+       DEL    -> entry hatana       (POST action:"delete")
      ================================================================ -->
 <script>
-const SUPABASE_URL = 'https://jogkzxjekzukizodiilr.supabase.co';
-const SUPABASE_KEY = 'sb_publishable_YEAQrKUqw96YOBEC1sWMDA_F8f_SDhL';
+/* 1) Apps Script deploy karne ke baad jo Web App URL mile (…/exec) wo yahan paste karein */
+const SHEET_API_URL  = 'https://script.google.com/macros/s/AKfycbwq6H5KrdyBnhq7hG2PjrF_wI1vcDSxOPS6QdndBgGycU8Flxtdb9Et0G6ikoaB-tyo/exec';
+/* 2) Code.gs ke API_PASSWORD se bilkul same. Ye badla to purani files sheet se kat jayengi */
+const SHEET_PASSWORD = 'FY2No-hQyNG-kfgJV-kOc6J';
+/* 3) Is build ka number. Code.gs ka MIN_BUILD is se bara ho to ye file sirf parh sakti hai */
+const APP_BUILD      = 2026111601;
 
-/* is app ka apna project naam — DPR ke data se alag rahega */
-const CLOUD_PROJECT = 'vdc_register';
+(function(){
+  var META_KEYS=['projects','locations','owners','users','seq','apprSeq','closeSeq','pwMigrated'];
+  var COUNTERS=['seq','apprSeq','closeSeq'];
+  var SYNC_KEY='vdc_sheet_sync_v1', TRASH_KEY='vdc_sheet_trash_v1';
 
-function cloudOn(){ return SUPABASE_URL.indexOf('PASTE_')<0 && SUPABASE_KEY.indexOf('PASTE_')<0; }
-function supaHeaders(extra){
-  return Object.assign({apikey:SUPABASE_KEY,Authorization:'Bearer '+SUPABASE_KEY},extra||{});
-}
-function cloudStatus(state,msg){
-  var el=document.getElementById('cloudChip'); if(!el) return;
-  var map={ok:['#16a34a','\u2601 Synced'],sync:['#0ea5e9','\u2601 Syncing\u2026'],
-            err:['#dc2626','\u2601 Sync failed'],off:['#94a3b8','\u2601 Offline only']};
-  var m=map[state]||map.off;
-  el.style.background=m[0]; el.textContent=msg||m[1];
-}
+  /* S = jo cheezein abhi sheet par jani baqi hain (browser band ho jaye to bhi yaad rehti hain) */
+  var S=(function(){
+    try{ var o=JSON.parse(localStorage.getItem(SYNC_KEY)||'null');
+      if(o&&o.dirty) return {dirty:o.dirty||{},meta:o.meta||{},failed:o.failed||{},tries:{}}; }catch(e){}
+    return {dirty:{},meta:{},failed:{},tries:{}};
+  })();
+  function saveS(){ try{ localStorage.setItem(SYNC_KEY,JSON.stringify(S)); }catch(e){} }
 
-/* ---------- STORAGE BUCKET (pictures + documents) ----------
-   File ab records.data ke andar base64 ban kar nahin jati.
-   Ye bucket mein upload hoti hai, aur sirf uska URL DB mein save hota hai. */
-const VDC_BUCKET = 'vdc-files';
+  var shadow={e:{},m:{}};        // sheet ki aakhri maloom halat (tabdeeli pakarne ke liye)
+  var busy=false, again=false, blocked=null, needsUpload=false, pulledOnce=false;
+  var lastErr='', sheetUrl='', lastSync=null, timer=null, fileCache={};
 
-window.vdcUpload = async function(path, file){
-  if(!cloudOn()) throw new Error('cloud off');
-  /* path saaf karo: spaces/urdu/brackets sab hata do warna Storage reject karti hai */
-  var clean = String(path).replace(/[^A-Za-z0-9._\/-]+/g,'_').replace(/_+/g,'_');
-  var res = await fetch(SUPABASE_URL+'/storage/v1/object/'+VDC_BUCKET+'/'+clean,{
-    method:'POST',
-    headers:supaHeaders({
-      'Content-Type': file.type || 'application/octet-stream',
-      'x-upsert':'true'          // wohi naam dobara aaye to overwrite
-    }),
-    body:file});
-  if(!res.ok) throw new Error('upload '+res.status+' '+(await res.text()));
-  return { path:clean,
-           url:SUPABASE_URL+'/storage/v1/object/public/'+VDC_BUCKET+'/'+encodeURI(clean) };
-};
+  function cloudOn(){ return /^https:\/\/script\.google\.com\//.test(SHEET_API_URL); }
+  function getDb(){ return (window.__vdcGetDb&&window.__vdcGetDb())||null; }
+  function setDb(o){ if(window.__vdcSetDb) window.__vdcSetDb(o); }
+  function store(){ if(window.__vdcStore) window.__vdcStore(); }
+  function say(m){ try{ if(window.__vdcToast) window.__vdcToast(m); }catch(e){} }
+  function who(){ return window.__vdcUserName||''; }
+  function num(id){ var m=String(id).match(/(\d+)$/); return m?Number(m[1]):0; }
+  function clean(e){ var c=JSON.parse(JSON.stringify(e)); delete c._rev; return c; }
+  function str(e){ return JSON.stringify(clean(e)); }
+  function findE(id){ var db=getDb(); if(!db) return null;
+    for(var i=0;i<(db.entries||[]).length;i++) if(String(db.entries[i].id)===String(id)) return db.entries[i];
+    return null; }
+  function maxLocalNum(){ var db=getDb(), mx=0;
+    (db&&db.entries||[]).forEach(function(e){ var n=num(e.id); if(n>mx) mx=n; }); return mx; }
+  function pendingCount(){ return Object.keys(S.dirty).length+(Object.keys(S.meta).length?1:0); }
 
-async function supaPull(type){
-  var url=SUPABASE_URL+'/rest/v1/records'
-    +'?project=eq.'+encodeURIComponent(CLOUD_PROJECT)
-    +'&type=eq.'+encodeURIComponent(type)
-    +'&select=item_id,data&order=item_id.asc';
-  var res=await fetch(url,{headers:supaHeaders()});
-  if(!res.ok) throw new Error('pull '+res.status+' '+(await res.text()));
-  return await res.json();
-}
-async function supaPush(type,rows){
-  if(!rows.length) return;
-  var payload=rows.map(function(r){return{
-    project:CLOUD_PROJECT, type:type, item_id:String(r.item_id),
-    data:r.data, updated_at:new Date().toISOString()};});
-  var res=await fetch(SUPABASE_URL+'/rest/v1/records?on_conflict=project,type,item_id',{
-    method:'POST',
-    headers:supaHeaders({'Content-Type':'application/json',Prefer:'resolution=merge-duplicates'}),
-    body:JSON.stringify(payload)});
-  if(!res.ok) throw new Error('push '+res.status+' '+(await res.text()));
-}
+  /* jo entry yahan se hatani pare uski copy browser me rakh lo (aakhri 100) */
+  function trash(e,reason){
+    if(!e) return;
+    try{ var l=JSON.parse(localStorage.getItem(TRASH_KEY)||'[]');
+      l.push({at:new Date().toISOString(),reason:reason,entry:stripBig(clean(e))});
+      localStorage.setItem(TRASH_KEY,JSON.stringify(l.slice(-100))); }catch(x){}
+  }
 
-/* cloud se ek row hatao */
-async function supaDelete(type,itemId){
-  var res=await fetch(SUPABASE_URL+'/rest/v1/records'
-    +'?project=eq.'+encodeURIComponent(CLOUD_PROJECT)
-    +'&type=eq.'+encodeURIComponent(type)
-    +'&item_id=eq.'+encodeURIComponent(String(itemId)),
-    {method:'DELETE',headers:supaHeaders()});
-  if(!res.ok) throw new Error('delete '+res.status+' '+(await res.text()));
-}
-
-/* bari base64 files cloud par nahin bhejte — row bhaari ho jati hai */
-function stripBig(o){
-  var c; try{ c=JSON.parse(JSON.stringify(o)); }catch(e){ return o; }
-  (function walk(x){
-    if(!x||typeof x!=='object') return;
-    Object.keys(x).forEach(function(k){
-      var v=x[k];
-      if(typeof v==='string' && v.indexOf('data:')===0 && v.length>20000){ x[k]=''; }
-      else if(v&&typeof v==='object') walk(v);
-    });
-  })(c);
-  return c;
-}
-
-/* ---------- push ---------- */
-var _vdcTimer=null;
-window.vdcCloudSave=function(db){
-  if(!cloudOn()) return;
-  cloudStatus('sync');
-  clearTimeout(_vdcTimer);
-  _vdcTimer=setTimeout(function(){ vdcPush(db); },1200);
-};
-
-async function vdcPush(db){
-  if(!cloudOn()||!db) return;
-  try{
-    /* settings + lists ek row mein */
-    await supaPush('vdc_meta',[{item_id:'main',data:{
-      projects:db.projects, locations:db.locations, owners:db.owners,
-      users:db.users, seq:db.seq, apprSeq:db.apprSeq, closeSeq:db.closeSeq,
-      pwMigrated:db.pwMigrated
-    }}]);
-    /* har entry apni row — id unique hai */
-    var arr=(db.entries||[]).map(function(e,i){
-      return {item_id:String(e.id||('e'+i)), data:stripBig(e)};
-    });
-    for(var i=0;i<arr.length;i+=25){ await supaPush('vdc_entry',arr.slice(i,i+25)); }
-
-    /* ---- DELETE DIFF ----
-       Upsert kabhi kuch mitata nahin. Agar user ne koi entry delete ki hai to
-       uski row cloud par pari reh jati thi aur agle pull par wapas aa jati thi.
-       Yahan cloud ki list se wo rows hatate hain jo ab local mein nahin hain. */
-    var localIds={}; arr.forEach(function(r){ localIds[r.item_id]=1; });
-    var remote=await supaPull('vdc_entry');
-    for(var j=0;j<remote.length;j++){
-      if(!localIds[String(remote[j].item_id)]){
-        await supaDelete('vdc_entry', remote[j].item_id);
-      }
-    }
-    cloudStatus('ok');
-  }catch(e){ cloudStatus('err'); console.warn('vdc push',e); }
-}
-
-/* ---------- pull ---------- */
-async function vdcPull(silent){
-  if(!cloudOn()) return;
-  cloudStatus('sync');
-  try{
-    var r=await Promise.all([supaPull('vdc_meta'),supaPull('vdc_entry')]);
-    var M=r[0], E=r[1];
-    var cur=(window.__vdcGetDb&&window.__vdcGetDb())||{};
-
-    /* glitch guard: cloud khali hai magar local par entries hain */
-    if(!E.length && (cur.entries||[]).length){ cloudStatus('ok'); return; }
-
-    var next=JSON.parse(JSON.stringify(cur));
-    if(M.length && M[0].data){
-      var m=M[0].data;
-      ['projects','locations','owners','users','seq','apprSeq','closeSeq','pwMigrated']
-        .forEach(function(k){ if(m[k]!==undefined) next[k]=m[k]; });
-    }
-    if(E.length){
-      var byId={}; (cur.entries||[]).forEach(function(e){ byId[String(e.id)]=e; });
-      next.entries=E.map(function(x){
-        var inc=x.data, old=byId[String(inc.id)];
-        /* local attachments cloud par nahin jate (stripBig) — unhein local copy se
-           wapas laao: entry docs aur closeout docs, dono ke data: URL fields */
-        function keepFiles(oldDocs, incDocs){
-          if(!oldDocs||!incDocs) return;
-          Object.keys(oldDocs).forEach(function(k){
-            var ov=oldDocs[k], iv=incDocs[k];
-            if(!ov||typeof ov!=='object'||!iv||typeof iv!=='object') return;
-            Object.keys(ov).forEach(function(f){
-              var val=ov[f];
-              if(typeof val==='string' && val.indexOf('data:')===0 && !iv[f]){
-                if(!iv.fileName || iv.fileName===ov.fileName) iv[f]=val;
-              }
-            });
-          });
-        }
-        if(old){
-          keepFiles(old.docs, inc.docs);
-          if(old.closeout&&inc.closeout) keepFiles(old.closeout.docs, inc.closeout.docs);
-        }
-        return inc;
+  /* bari base64 files sheet ki row me nahin jati — wo Drive par upload hoti hain */
+  function stripBig(o){
+    var c; try{ c=JSON.parse(JSON.stringify(o)); }catch(e){ return o; }
+    (function walk(x){
+      if(!x||typeof x!=='object') return;
+      Object.keys(x).forEach(function(k){
+        var v=x[k];
+        if(typeof v==='string' && v.indexOf('data:')===0 && v.length>2000){ x[k]=''; }
+        else if(v&&typeof v==='object') walk(v);
+      });
+    })(c);
+    return c;
+  }
+  /* pull ke waqt is browser me pari attachment (data:) wapas jor do */
+  function keepFiles(old,inc){
+    function one(oldDocs,incDocs){
+      if(!oldDocs||!incDocs) return;
+      Object.keys(oldDocs).forEach(function(k){
+        var ov=oldDocs[k], iv=incDocs[k];
+        if(!ov||typeof ov!=='object'||!iv||typeof iv!=='object') return;
+        Object.keys(ov).forEach(function(f){
+          var val=ov[f];
+          if(typeof val==='string' && val.indexOf('data:')===0 && !iv[f] && !iv.fileUrl){
+            if(!iv.fileName || iv.fileName===ov.fileName) iv[f]=val;
+          }
+        });
       });
     }
-    if(window.__vdcSetDb) window.__vdcSetDb(next);
-    cloudStatus('ok');
-    if(!silent && typeof toast==='function') toast('Cloud se data le liya.');
-  }catch(e){ cloudStatus('err'); console.warn('vdc pull',e); }
-}
+    if(!old||!inc) return;
+    one(old.docs,inc.docs);
+    if(old.closeout&&inc.closeout) one(old.closeout.docs,inc.closeout.docs);
+  }
+  function docLists(e){ var a=[]; if(e.docs) a.push(e.docs); if(e.closeout&&e.closeout.docs) a.push(e.closeout.docs); return a; }
 
-async function vdcPushAll(){
-  if(!cloudOn()){ cloudStatus('off'); return; }
-  var db=window.__vdcGetDb&&window.__vdcGetDb();
-  if(!db){ cloudStatus('err'); return; }
-  await vdcPush(db);
-  if(typeof toast==='function') toast('Cloud par bhej diya: '+(db.entries||[]).length+' entries.');
-}
+  /* ---------------- API ---------------- */
+  function ApiErr(code,data,msg){ var e=new Error(msg||code); e.code=code; e.data=data||{}; return e; }
+  async function apiCall(method,action,payload){
+    var res;
+    try{
+      if(method==='GET'){
+        res=await fetch(SHEET_API_URL+'?action='+encodeURIComponent(action)
+          +'&password='+encodeURIComponent(SHEET_PASSWORD)+'&build='+APP_BUILD+'&t='+Date.now(),
+          {method:'GET',redirect:'follow'});
+      }else{
+        /* text/plain = "simple request", is liye browser preflight nahin bhejta (Apps Script ko chahiye) */
+        res=await fetch(SHEET_API_URL,{method:'POST',redirect:'follow',
+          headers:{'Content-Type':'text/plain;charset=utf-8'},
+          body:JSON.stringify(Object.assign({action:action,password:SHEET_PASSWORD,build:APP_BUILD,user:who()},payload||{}))});
+      }
+    }catch(e){ throw ApiErr('network',null,'Internet / server tak nahin pohanch saka'); }
+    var j=null;
+    try{ j=JSON.parse(await res.text()); }catch(e){}
+    if(!j) throw ApiErr('network',null,'Web App URL ya uski access ("Anyone") check karein');
+    if(!j.ok){
+      if(j.error==='old_build'||j.error==='bad_password') block(j.error);
+      throw ApiErr(j.error||'server',j,j.message||j.error);
+    }
+    return j;
+  }
 
-/* ---------- chip ---------- */
-(function(){
+  /* ---------------- purani build / ghalat password ---------------- */
+  function block(code){
+    if(blocked) return; blocked=code;
+    var old=document.getElementById('vdc-banner'); if(old) old.remove();
+    var b=document.createElement('div'); b.id='vdc-banner';
+    b.style.cssText='position:fixed;left:0;right:0;top:0;z-index:99998;background:#b91c1c;color:#fff;'
+      +'font:600 13px/1.4 system-ui,sans-serif;padding:9px 16px;text-align:center;box-shadow:0 2px 10px rgba(0,0,0,.3)';
+    b.textContent = code==='old_build'
+      ? '⚠ Ye app ki purani build hai. Yahan ki koi tabdeeli Google Sheet par save NAHIN hogi — nayi file / naya link kholein.'
+      : '🔒 Sheet password match nahin hua. Is file se Google Sheet par kuch save nahin hoga — nayi file / naya link kholein.';
+    document.body.appendChild(b);
+    paint();
+  }
+
+  /* ---------------- status chip + Setup card ---------------- */
+  function paint(){
+    var st, txt;
+    var n=pendingCount(), f=Object.keys(S.failed).length;
+    if(!cloudOn()){ st='off'; txt='☁ Sheet not connected'; }
+    else if(blocked==='old_build'){ st='err'; txt='⚠ Purani build — save band'; }
+    else if(blocked){ st='err'; txt='🔒 Password ghalat'; }
+    else if(needsUpload){ st='warn'; txt='⚠ Sheet khali hai — upload karein'; }
+    else if(busy){ st='sync'; txt='☁ Syncing…'; }
+    else if(lastErr){ st='err'; txt='☁ Sync failed'+(n?' · '+n+' pending':''); }
+    else if(n){ st='sync'; txt='☁ '+n+' pending'; }
+    else if(f){ st='warn'; txt='⚠ '+f+' not saved'; }
+    else { st='ok'; txt='☁ Sheet synced'; }
+    var col={ok:'#16a34a',sync:'#0ea5e9',err:'#dc2626',off:'#94a3b8',warn:'#d97706'}[st];
+    var el=document.getElementById('cloudChip');
+    if(el){ el.style.background=col; el.textContent=txt; }
+    var g=document.getElementById('gs-status');
+    if(g){
+      var more='';
+      if(!cloudOn()) more='Web App URL abhi file me paste nahin hua — data sirf is browser me hai.';
+      else if(blocked) more='Is file ko sheet par likhne ki ijazat nahin. Nayi file istemal karein.';
+      else if(needsUpload) more='Google Sheet me abhi koi entry nahin, lekin is browser me data mojood hai. Neeche "Upload" dabayen.';
+      else if(lastErr) more=lastErr+' — 30 second baad khud dobara koshish hogi.';
+      else if(lastSync) more='Aakhri sync: '+lastSync.toLocaleTimeString();
+      g.textContent=txt.replace(/^\S+\s/,'')+(more?' — '+more:'');
+      g.style.color=col;
+    }
+    var bl=document.getElementById('gs-build'); if(bl) bl.textContent='Build '+APP_BUILD;
+    var a=document.getElementById('gs-open');
+    if(a){ if(sheetUrl){ a.href=sheetUrl; a.style.display='inline-flex'; } else a.style.display='none'; }
+  }
+
+  /* ---------------- local tabdeeli pakarna ---------------- */
+  function rebuildShadow(){
+    var db=getDb(); shadow={e:{},m:{}}; if(!db) return;
+    (db.entries||[]).forEach(function(e){ shadow.e[String(e.id)]=str(e); });
+    META_KEYS.forEach(function(k){ if(db[k]!==undefined) shadow.m[k]=JSON.stringify(db[k]); });
+  }
+  function schedule(ms){ clearTimeout(timer); timer=setTimeout(function(){ sync({pull:false,silent:true}); },ms); }
+
+  /* app har save par ye bulati hai */
+  window.vdcCloudSave=function(db){
+    if(!cloudOn()||!db) return;
+    (db.entries||[]).forEach(function(e){
+      var id=String(e.id), s=str(e);
+      if(!(id in shadow.e)){ S.dirty[id]='new'; }
+      else if(shadow.e[id]!==s){ if(S.dirty[id]!=='new') S.dirty[id]='upd'; delete S.failed[id]; }
+      shadow.e[id]=s;
+    });
+    META_KEYS.forEach(function(k){
+      if(db[k]===undefined) return;
+      var s=JSON.stringify(db[k]);
+      if(shadow.m[k]!==s){ S.meta[k]=1; shadow.m[k]=s; }
+    });
+    saveS(); paint(); schedule(1200);
+  };
+  /* DEL sirf tab jata hai jab user khud delete dabaye — kabhi andaze se nahin */
+  window.vdcCloudDelete=function(id){
+    if(!cloudOn()) return;
+    id=String(id);
+    var neverSent=(S.dirty[id]==='new' && inFlight!==id);
+    delete shadow.e[id]; delete S.failed[id];
+    if(neverSent) delete S.dirty[id]; else S.dirty[id]='del';
+    saveS(); paint(); schedule(600);
+  };
+
+  /* ---------------- files (Google Drive) ---------------- */
+  function toB64(file){ return new Promise(function(res,rej){
+    var r=new FileReader();
+    r.onload=function(){ res(String(r.result).split(',')[1]||''); };
+    r.onerror=function(){ rej(ApiErr('read')); };
+    r.readAsDataURL(file); }); }
+  window.vdcUpload=async function(path,file){
+    if(!cloudOn()) throw ApiErr('off');
+    if(blocked) throw ApiErr(blocked);
+    if(file.size>20*1024*1024) throw ApiErr('too_big',null,'File 20MB se bari hai');
+    var r=await apiCall('POST','upload',{path:String(path),name:file.name||'',
+      mime:file.type||'application/octet-stream',b64:await toB64(file)});
+    return {path:'drive:'+r.id,url:r.url};
+  };
+  /* print ke liye Drive file ka asal data (image / PDF) */
+  window.vdcFileData=async function(dd){
+    var id=String(dd&&dd.filePath||'').replace(/^drive:/,''); if(!id) return null;
+    if(fileCache[id]) return fileCache[id];
+    var r=await apiCall('POST','file',{id:id});
+    return (fileCache[id]='data:'+r.mime+';base64,'+r.b64);
+  };
+  /* entry bhejne se pehle uski browser-wali file Drive par chali jati hai */
+  async function uploadInline(e){
+    var changed=false, lists=docLists(e);
+    for(var i=0;i<lists.length;i++){
+      var keys=Object.keys(lists[i]);
+      for(var k=0;k<keys.length;k++){
+        var dd=lists[i][keys[k]];
+        if(!dd||typeof dd.fileData!=='string'||dd.fileData.indexOf('data:')!==0||dd.fileUrl||!dd.fileName) continue;
+        try{
+          var blob=await (await fetch(dd.fileData)).blob();
+          var r=await window.vdcUpload('entry/'+e.id+'/'+dd.fileName,blob);
+          dd.fileUrl=r.url; dd.filePath=r.path; dd.fileData=''; changed=true;
+        }catch(x){ if(x.code==='old_build'||x.code==='bad_password'||x.code==='network') throw x; }
+      }
+    }
+    if(changed) store();
+  }
+
+  /* ---------------- POST / UPDATE / DEL bhejna ---------------- */
+  var inFlight=null;
+  async function flushDirty(){
+    var did=false, guard=0;
+    while(guard++<1000){
+      var ids=Object.keys(S.dirty); if(!ids.length) break;
+      var id=ids[0], op=S.dirty[id];
+      inFlight=id;
+      try{
+        if(op==='del'){
+          await apiCall('POST','delete',{id:id});
+          if(S.dirty[id]==='del') delete S.dirty[id];
+          saveS(); did=true; continue;
+        }
+        var e=findE(id);
+        if(!e){ delete S.dirty[id]; saveS(); continue; }
+        await uploadInline(e);
+        var sent=str(e), r=null;
+        try{
+          r=await apiCall('POST',op==='new'?'create':'update',
+            {entry:stripBig(clean(e)),baseRev:(e._rev==null?null:e._rev),avoidMax:maxLocalNum()});
+        }catch(err){
+          if(err.code==='network'||err.code==='old_build'||err.code==='bad_password') throw err;
+          /* ye entry sheet par kabhi gayi hi nahin thi -> nayi bana kar bhejo */
+          if(err.code==='not_found' && e._rev==null){ S.dirty[id]='new'; saveS(); continue; }
+          if(err.code==='server'){ S.tries[id]=(S.tries[id]||0)+1; if(S.tries[id]<4) throw err; }
+          rejected(id,err); did=true; continue;
+        }
+        saved(id,sent,r); did=true;
+      } finally { inFlight=null; }
+    }
+    return did;
+  }
+
+  function saved(id,sent,r){
+    var db=getDb(), e=findE(id), ui=false;
+    delete S.tries[id]; delete S.failed[id];
+    if(!e){ if(S.dirty[id]!=='del') delete S.dirty[id]; saveS(); return; }   // beech me delete ho gayi
+    var changed=(str(e)!==sent), newId=id;
+    if(r.entry && String(r.entry.id)!==id){
+      /* ye number kisi aur device ne pehle le liya tha — sheet ne agla number diya */
+      newId=String(r.entry.id);
+      e.id=newId; if(r.entry.formno) e.formno=r.entry.formno;
+      delete shadow.e[id];
+      if((Number(db.seq)||1)<=num(newId)){ db.seq=num(newId)+1; shadow.m.seq=JSON.stringify(db.seq); }
+      var ed=document.getElementById('edit-id'); if(ed&&ed.value===id) ed.value=newId;
+      say('Form number '+(e.formno||newId)+' ho gaya — pehla number kisi aur device ne le liya tha.');
+      ui=true;
+    }
+    e._rev=r.rev;
+    delete S.dirty[id];
+    if(changed) S.dirty[newId]='upd';
+    shadow.e[newId]=str(e);
+    saveS();
+    if(ui){ setDb(db); freshFormNo(); } else store();
+  }
+
+  function rejected(id,err){
+    var db=getDb(), e=findE(id);
+    delete S.dirty[id]; delete S.tries[id];
+    if(err.code==='conflict' && err.data && err.data.entry){
+      var inc=err.data.entry; trash(e,'conflict');
+      keepFiles(e,inc);
+      db.entries=db.entries.map(function(x){ return String(x.id)===id?inc:x; });
+      shadow.e[id]=str(inc);
+      say('Entry '+(inc.formno||id)+' kisi aur ne pehle badal di thi — sheet wali taza copy aa gayi. Apni tabdeeli dobara karein.');
+    }else if(err.code==='not_found'){
+      trash(e,'deleted on sheet');
+      db.entries=db.entries.filter(function(x){ return String(x.id)!==id; });
+      delete shadow.e[id];
+      say('Ye entry sheet se delete ho chuki thi — yahan se bhi hat gayi.');
+    }else{
+      S.failed[id]=err.code||'error';
+      say('Entry '+((e&&e.formno)||id)+' sheet par save nahin hui ('+(err.code||'error')+') — abhi sirf is browser me hai.');
+    }
+    saveS(); setDb(db);
+  }
+
+  async function flushMeta(){
+    var keys=Object.keys(S.meta); if(!keys.length) return false;
+    var db=getDb(), part={}, sent={};
+    keys.forEach(function(k){
+      if(db[k]===undefined){ delete S.meta[k]; return; }
+      part[k]=db[k]; sent[k]=JSON.stringify(db[k]); });
+    if(!Object.keys(part).length){ saveS(); return false; }
+    var r=await apiCall('POST','meta',{meta:part});
+    db=getDb();
+    Object.keys(part).forEach(function(k){ if(JSON.stringify(db[k])===sent[k]) delete S.meta[k]; });
+    COUNTERS.forEach(function(k){
+      var sv=Number(r.meta&&r.meta[k])||0;
+      if(sv>(Number(db[k])||0)){ db[k]=sv; shadow.m[k]=JSON.stringify(sv); }
+    });
+    saveS(); store();
+    return true;
+  }
+
+  /* khali (naya) form khula ho to uska Form No taza counter se dobara bana do */
+  function freshFormNo(){
+    try{
+      var db=getDb(), ed=document.getElementById('edit-id'), f=document.getElementById('f-formno');
+      if(!db||!f||(ed&&ed.value)) return;
+      f.value='CDO-'+String(db.seq).padStart(4,'0');
+      var t=document.getElementById('form-no-tag'); if(t) t.textContent=f.value;
+    }catch(e){}
+  }
+
+  /* ---------------- GET : sheet ka data yahan lana ---------------- */
+  function reconcile(j){
+    /* jab tak yahan ki koi cheez bhejni baqi ho, sheet ka data upar nahin chadhate */
+    if(Object.keys(S.dirty).length) return false;
+    var cur=getDb(); if(!cur) return false;
+    var next=JSON.parse(JSON.stringify(cur)), m=j.meta||{};
+    META_KEYS.forEach(function(k){
+      if(S.meta[k]) return;
+      if(m[k]!==undefined) next[k]=m[k]; else if(cur[k]!==undefined) S.meta[k]=1;
+    });
+    /* counters: sheet ka number hi asal hai (purani copy isay aage nahin dhakel sakti) */
+    COUNTERS.forEach(function(k){
+      if(S.meta[k]) return;
+      if(m[k]!==undefined) next[k]=Number(m[k])||1;
+    });
+    var byId={}, onSheet={};
+    (cur.entries||[]).forEach(function(e){ byId[String(e.id)]=e; });
+    var list=(j.entries||[]).map(function(inc){
+      var id=String(inc.id), old=byId[id]; onSheet[id]=1;
+      if(old && S.failed[id]) return old;
+      keepFiles(old,inc);
+      return inc;
+    });
+    (cur.entries||[]).forEach(function(e){
+      var id=String(e.id); if(onSheet[id]) return;
+      if(S.failed[id]) list.push(e);
+      else trash(e,'not on sheet');           // sheet se hat chuki — copy mehfooz
+    });
+    next.entries=list;
+    var seqMoved=(next.seq!==cur.seq);
+    if(JSON.stringify(next)!==JSON.stringify(cur)) setDb(next);
+    rebuildShadow(); saveS();
+    if(seqMoved) freshFormNo();
+    return true;
+  }
+
+  /* ---------------- main sync ---------------- */
+  async function sync(opts){
+    opts=opts||{};
+    if(!cloudOn()||blocked){ paint(); return; }
+    if(busy){ again=true; return; }
+    busy=true; lastErr=''; paint();
+    try{
+      var j=null;
+      if(opts.pull||!pulledOnce){
+        j=await apiCall('GET','list');
+        sheetUrl=j.sheetUrl||sheetUrl;
+        var cur=getDb();
+        /* hifazat: sheet khali hai magar yahan data hai -> kuch mat mitao, upload ka poochho */
+        needsUpload=(!j.entries.length && (cur.entries||[]).length>0);
+        if(needsUpload) return;
+      }
+      var did=await flushDirty();
+      did=(await flushMeta())||did;
+      if(j){
+        if(did) j=await apiCall('GET','list');
+        reconcile(j); pulledOnce=true;
+        if(Object.keys(S.meta).length) await flushMeta();
+        if(!opts.silent) say('Google Sheet se data taza ho gaya.');
+      }
+      lastSync=new Date();
+    }catch(e){
+      lastErr=(e&&e.message)||'error'; console.warn('sheet sync',e);
+      if(!blocked) schedule(30000);
+    }finally{
+      busy=false; paint();
+      if(again){ again=false; schedule(300); }
+    }
+  }
+
+  /* ---------------- pehli dafa: is browser ka data sheet par ---------------- */
+  async function bulkUpload(){
+    if(!cloudOn()||blocked){ paint(); return; }
+    if(busy){ say('Sync chal raha hai — ek lamha baad dobara dabayen.'); return; }
+    busy=true; lastErr=''; paint();
+    try{
+      var db=getDb(), all=(db.entries||[]), added=0, skipped=0, big=0;
+      for(var i=0;i<all.length;i+=40){
+        var part=all.slice(i,i+40).map(function(e){ return stripBig(clean(e)); });
+        var r=await apiCall('POST','bulk',{entries:part});
+        (r.added||[]).forEach(function(id){ var e=findE(id); if(e) e._rev=1; delete S.dirty[id]; added++; });
+        skipped+=(r.skipped||[]).length;
+        (r.tooBig||[]).forEach(function(id){ S.failed[id]='too_big'; big++; });
+      }
+      var meta={}; META_KEYS.forEach(function(k){ if(db[k]!==undefined) meta[k]=db[k]; });
+      await apiCall('POST','meta',{meta:meta});
+      S.meta={};
+      /* jin entries ki file sirf is browser me hai unhein dobara bhejo taake file Drive par jaye */
+      all.forEach(function(e){
+        if(e._rev==null) return;
+        var inline=docLists(e).some(function(L){ return Object.keys(L).some(function(k){
+          var dd=L[k]; return dd&&typeof dd.fileData==='string'&&dd.fileData.indexOf('data:')===0&&!dd.fileUrl; }); });
+        if(inline) S.dirty[String(e.id)]='upd';
+      });
+      store(); rebuildShadow(); saveS();
+      needsUpload=false; pulledOnce=false;
+      say('Sheet par '+added+' entries upload ho gayin'+(skipped?' ('+skipped+' pehle se thin)':'')+(big?' — '+big+' bohat bari thin':'')+'.');
+    }catch(e){
+      lastErr=(e&&e.message)||'error'; console.warn('bulk upload',e);
+      say('Upload poora nahin hua: '+lastErr);
+    }finally{ busy=false; paint(); }
+    if(!lastErr) sync({pull:true,silent:true});
+  }
+
+  /* ---------------- purani attachments ko Drive par lana ---------------- */
+  async function migrateFiles(){
+    if(!cloudOn()||blocked){ paint(); return; }
+    var db=getDb(), moved=0, failed=0, none=0, total=0;
+    var jobs=[];
+    (db.entries||[]).forEach(function(e){ docLists(e).forEach(function(L){ Object.keys(L).forEach(function(k){
+      var dd=L[k]; if(!dd||!dd.fileName||/^drive:/.test(dd.filePath||'')) return;
+      jobs.push({e:e,dd:dd});
+    }); }); });
+    total=jobs.length;
+    if(!total){ say('Sab attachments pehle hi Google Drive par hain.'); return; }
+    var g=document.getElementById('gs-files');
+    for(var i=0;i<jobs.length;i++){
+      var e=jobs[i].e, dd=jobs[i].dd, src=dd.fileUrl||dd.fileData||'';
+      if(g) g.textContent='Files Drive par ja rahi hain: '+(i+1)+' / '+total+' …';
+      if(!src){ none++; continue; }
+      try{
+        var res=await fetch(src); if(!res.ok) throw new Error('http '+res.status);
+        var blob=await res.blob();
+        var r=await window.vdcUpload('entry/'+e.id+'/'+dd.fileName,blob);
+        dd.fileUrl=r.url; dd.filePath=r.path; dd.fileData=''; moved++;
+        store(); window.vdcCloudSave(getDb());
+      }catch(x){ failed++; console.warn('file move',dd.fileName,x); if(blocked) break; }
+    }
+    if(g) g.textContent='Drive par gayin: '+moved+(failed?' · na ja sakin: '+failed:'')
+      +(none?' · sirf naam mehfooz tha (file nahin): '+none:'');
+    say(moved+' file(s) Google Drive par chali gayin.');
+  }
+
+  function askUpload(){
+    var db=getDb(), n=(db&&db.entries||[]).length;
+    var go=function(){ bulkUpload(); };
+    var msg='Is browser ki '+n+' entries Google Sheet par upload karein? Sirf wo rows add hongi jo sheet par nahin hain — sheet ki maujooda rows nahin badlengi.';
+    if(window.__vdcAsk) window.__vdcAsk(msg,go,'Yes, upload'); else go();
+  }
+
+  window.vdcSheet={
+    syncNow:function(){ sync({pull:true}); },
+    upload:askUpload,
+    moveFiles:migrateFiles
+  };
+
+  /* ---------------- boot ---------------- */
   function boot(){
+    document.querySelectorAll('#cloudChip,#vdc-banner').forEach(function(n){ n.remove(); });
     var chip=document.createElement('div');
     chip.id='cloudChip';
     chip.style.cssText='position:fixed;right:12px;bottom:12px;z-index:99999;'
       +'padding:7px 12px;border-radius:999px;color:#fff;font:600 12px system-ui,sans-serif;'
       +'background:#94a3b8;cursor:pointer;box-shadow:0 2px 10px rgba(0,0,0,.25);user-select:none';
-    chip.title='Click: cloud se data laao  \u00b7  Double-click: sab kuch cloud par bhejo';
-    chip.onclick=function(){ vdcPull(); };
-    chip.ondblclick=function(){ if(window.__vdcAsk) window.__vdcAsk('Sab data cloud par bhejein?',vdcPushAll); else vdcPushAll(); };
+    chip.title='Click: Google Sheet ke sath abhi sync karein';
+    chip.onclick=function(){
+      if(needsUpload){ if(window.__vdcAdmin) window.__vdcAdmin(askUpload,'Data sheet par upload karne ke liye admin password dein.'); else askUpload(); }
+      else sync({pull:true});
+    };
     document.body.appendChild(chip);
-    if(cloudOn()){ cloudStatus('ok'); setTimeout(function(){vdcPull(true);},1500); }
-    else cloudStatus('off');
+    rebuildShadow(); paint();
+    if(cloudOn()){
+      sync({pull:true,silent:true});
+      window.addEventListener('online',function(){ sync({pull:true,silent:true}); });
+    }
   }
   if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',boot);
   else boot();
